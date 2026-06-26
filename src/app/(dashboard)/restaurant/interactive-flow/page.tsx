@@ -1,0 +1,423 @@
+'use client'
+
+import { useCallback, useEffect, useState } from 'react'
+import { Plus, Edit2, Trash2, Save, Eye, EyeOff } from 'lucide-react'
+import { SortableList } from '@/components/restaurant/sortable-list'
+import { FieldFormDialog } from '@/components/restaurant/field-form-dialog'
+import { WhatsAppPreview } from '@/components/restaurant/whatsapp-preview'
+import { Skeleton } from '@/components/dashboard/skeleton'
+import { cn } from '@/lib/utils'
+import type {
+  RestaurantConfig,
+  RestaurantMenuItem,
+  RestaurantBookingField,
+} from '@/types/restaurant'
+import { FIELD_TYPE_LABELS } from '@/types/restaurant'
+
+export default function InteractiveFlowPage() {
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [config, setConfig] = useState<RestaurantConfig | null>(null)
+  const [menuItems, setMenuItems] = useState<RestaurantMenuItem[]>([])
+  const [fields, setFields] = useState<RestaurantBookingField[]>([])
+
+  // Dialog state
+  const [fieldDialogOpen, setFieldDialogOpen] = useState(false)
+  const [editingField, setEditingField] = useState<Partial<RestaurantBookingField> | null>(null)
+
+  const fetchData = useCallback(async () => {
+    try {
+      const [confRes, menuRes, fieldsRes] = await Promise.all([
+        fetch('/api/restaurant/config'),
+        fetch('/api/restaurant/menu-items'),
+        fetch('/api/restaurant/booking-fields'),
+      ])
+      const [conf, menu, flds] = await Promise.all([
+        confRes.json(),
+        menuRes.json(),
+        fieldsRes.json(),
+      ])
+      setConfig(conf.config)
+      setMenuItems(menu.items || [])
+      setFields(flds.fields || [])
+    } catch (err) {
+      console.error('Failed to load flow config:', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { fetchData() }, [fetchData])
+
+  // ===============================
+  // Menu Item Actions
+  // ===============================
+  const toggleMenuItem = async (id: string, current: boolean) => {
+    const updated = menuItems.map(i => i.id === id ? { ...i, is_enabled: !current } : i)
+    setMenuItems(updated)
+    try {
+      await fetch('/api/restaurant/menu-items', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: updated }),
+      })
+    } catch (err) {
+      console.error('Failed to toggle menu item', err)
+      await fetchData() // Revert on error
+    }
+  }
+
+  const reorderMenuItems = async (items: RestaurantMenuItem[]) => {
+    const updated = items.map((i, idx) => ({ ...i, position: idx }))
+    setMenuItems(updated)
+    try {
+      await fetch('/api/restaurant/menu-items', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: updated }),
+      })
+    } catch (err) {
+      console.error('Failed to reorder menu items', err)
+      await fetchData() // Revert
+    }
+  }
+
+  // ===============================
+  // Field Actions
+  // ===============================
+  const toggleField = async (id: string, current: boolean) => {
+    const updated = fields.map(f => f.id === id ? { ...f, is_enabled: !current } : f)
+    setFields(updated)
+    try {
+      await fetch('/api/restaurant/booking-fields', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, is_enabled: !current }),
+      })
+    } catch (err) {
+      console.error('Failed to toggle field', err)
+      await fetchData()
+    }
+  }
+
+  const deleteField = async (id: string) => {
+    if (!confirm('Are you sure you want to delete this field?')) return
+    setFields(fields.filter(f => f.id !== id))
+    try {
+      await fetch(`/api/restaurant/booking-fields?id=${id}`, { method: 'DELETE' })
+    } catch (err) {
+      console.error('Failed to delete field', err)
+      await fetchData()
+    }
+  }
+
+  const handleSaveField = async (data: Partial<RestaurantBookingField>) => {
+    try {
+      if (editingField?.id) {
+        // Update
+        const res = await fetch('/api/restaurant/booking-fields', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...data, id: editingField.id }),
+        })
+        const updated = await res.json()
+        setFields(fields.map(f => f.id === editingField.id ? updated.field : f))
+      } else {
+        // Create
+        const res = await fetch('/api/restaurant/booking-fields', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...data, position: fields.length }),
+        })
+        const created = await res.json()
+        setFields([...fields, created.field])
+      }
+    } catch (err) {
+      console.error('Failed to save field', err)
+    }
+  }
+
+  const reorderFields = async (items: RestaurantBookingField[]) => {
+    const updated = items.map((i, idx) => ({ ...i, position: idx }))
+    setFields(updated)
+    // Update all positions
+    try {
+      await Promise.all(
+        updated.map(i =>
+          fetch('/api/restaurant/booking-fields', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: i.id, position: i.position }),
+          })
+        )
+      )
+    } catch (err) {
+      console.error('Failed to reorder fields', err)
+      await fetchData()
+    }
+  }
+
+  // ===============================
+  // Config Actions
+  // ===============================
+  const saveConfig = async () => {
+    if (!config) return
+    setSaving(true)
+    try {
+      await fetch('/api/restaurant/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+      })
+      alert('Configuration saved successfully!')
+    } catch (err) {
+      console.error('Failed to save config', err)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="space-y-6">
+        <Skeleton className="h-8 w-48" />
+        <Skeleton className="h-64" />
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex h-[calc(100vh-6rem)] gap-6">
+      {/* Left side — Builder */}
+      <div className="flex-1 overflow-y-auto pr-2 space-y-8">
+        <div>
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-2xl font-bold tracking-tight text-foreground">
+                Interactive Flow Builder
+              </h1>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Design the conversational experience for your customers.
+              </p>
+            </div>
+            <button
+              onClick={saveConfig}
+              disabled={saving}
+              className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+            >
+              <Save className="h-4 w-4" />
+              {saving ? 'Saving...' : 'Save Settings'}
+            </button>
+          </div>
+        </div>
+
+        {/* Welcome Message Settings */}
+        <div className="rounded-xl border border-border bg-card p-5">
+          <h2 className="text-base font-semibold text-foreground">Welcome Message</h2>
+          <p className="mb-4 text-sm text-muted-foreground">Customize the initial greeting.</p>
+          
+          <div className="grid gap-4">
+            <div>
+              <label className="text-xs font-medium text-foreground">Header</label>
+              <input
+                type="text"
+                value={config?.welcome_header || ''}
+                onChange={(e) => setConfig(prev => prev ? { ...prev, welcome_header: e.target.value } : null)}
+                className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-foreground">Body Text</label>
+              <textarea
+                value={config?.welcome_body || ''}
+                onChange={(e) => setConfig(prev => prev ? { ...prev, welcome_body: e.target.value } : null)}
+                rows={3}
+                className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary resize-none"
+              />
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="text-xs font-medium text-foreground">Footer</label>
+                <input
+                  type="text"
+                  value={config?.welcome_footer || ''}
+                  onChange={(e) => setConfig(prev => prev ? { ...prev, welcome_footer: e.target.value } : null)}
+                  className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-foreground">Button Label</label>
+                <input
+                  type="text"
+                  value={config?.welcome_button_label || ''}
+                  onChange={(e) => setConfig(prev => prev ? { ...prev, welcome_button_label: e.target.value } : null)}
+                  className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Main Menu Options */}
+        <div className="rounded-xl border border-border bg-card p-5">
+          <h2 className="text-base font-semibold text-foreground">Main Menu Options</h2>
+          <p className="mb-4 text-sm text-muted-foreground">
+            Control which services are available in the WhatsApp list menu. Drag to reorder.
+          </p>
+          
+          <SortableList
+            items={menuItems}
+            onReorder={reorderMenuItems}
+            renderItem={(item) => (
+              <>
+                <div className="flex-1">
+                  <p className={cn("text-sm font-medium", !item.is_enabled && "text-muted-foreground line-through")}>
+                    {item.title}
+                  </p>
+                  <p className="text-xs text-muted-foreground">{item.description}</p>
+                </div>
+                <button
+                  onClick={() => toggleMenuItem(item.id, item.is_enabled)}
+                  className={cn(
+                    "rounded-lg px-2.5 py-1 text-xs font-medium transition-colors",
+                    item.is_enabled
+                      ? "bg-primary/10 text-primary hover:bg-primary/20"
+                      : "bg-muted text-muted-foreground hover:bg-muted/80"
+                  )}
+                >
+                  {item.is_enabled ? 'Enabled' : 'Disabled'}
+                </button>
+              </>
+            )}
+          />
+        </div>
+
+        {/* Booking Fields Configurator */}
+        <div className="rounded-xl border border-border bg-card p-5">
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <h2 className="text-base font-semibold text-foreground">Booking Flow Fields</h2>
+              <p className="text-sm text-muted-foreground">
+                Define the questions asked when a customer books a table. Drag to reorder.
+              </p>
+            </div>
+            <button
+              onClick={() => {
+                setEditingField(null)
+                setFieldDialogOpen(true)
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-primary/10 px-3 py-1.5 text-sm font-medium text-primary transition-colors hover:bg-primary/20"
+            >
+              <Plus className="h-4 w-4" />
+              Add Field
+            </button>
+          </div>
+          
+          {fields.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-border py-8 text-center">
+              <p className="text-sm text-muted-foreground">No booking fields defined.</p>
+            </div>
+          ) : (
+            <SortableList
+              items={fields}
+              onReorder={reorderFields}
+              renderItem={(field) => (
+                <>
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <p className={cn("text-sm font-medium", !field.is_enabled && "text-muted-foreground line-through")}>
+                        {field.field_label}
+                      </p>
+                      {field.is_required && (
+                        <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium text-destructive">
+                          Required
+                        </span>
+                      )}
+                      <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground capitalize">
+                        {FIELD_TYPE_LABELS[field.field_type]}
+                      </span>
+                    </div>
+                    <p className="text-xs text-muted-foreground font-mono mt-0.5">Key: {field.field_name}</p>
+                  </div>
+                  
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => toggleField(field.id, field.is_enabled)}
+                      className="p-1.5 text-muted-foreground hover:text-foreground"
+                      title={field.is_enabled ? 'Disable' : 'Enable'}
+                    >
+                      {field.is_enabled ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setEditingField(field)
+                        setFieldDialogOpen(true)
+                      }}
+                      className="p-1.5 text-muted-foreground hover:text-primary"
+                    >
+                      <Edit2 className="h-4 w-4" />
+                    </button>
+                    <button
+                      onClick={() => deleteField(field.id)}
+                      className="p-1.5 text-muted-foreground hover:text-destructive"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                </>
+              )}
+            />
+          )}
+        </div>
+
+        {/* Confirmation Message */}
+        <div className="rounded-xl border border-border bg-card p-5">
+          <h2 className="text-base font-semibold text-foreground">Confirmation Message</h2>
+          <p className="mb-4 text-sm text-muted-foreground">Sent after customer completes the flow.</p>
+          <textarea
+            value={config?.confirmation_template || ''}
+            onChange={(e) => setConfig(prev => prev ? { ...prev, confirmation_template: e.target.value } : null)}
+            rows={3}
+            placeholder="Thank you for booking..."
+            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary resize-none"
+          />
+        </div>
+
+        {/* Trigger Keywords */}
+        <div className="rounded-xl border border-border bg-card p-5">
+          <h2 className="text-base font-semibold text-foreground">Trigger Keywords</h2>
+          <p className="mb-4 text-sm text-muted-foreground">Keywords that start this flow when a customer sends a message.</p>
+          <input
+            type="text"
+            value={config?.trigger_keywords?.join(', ') || ''}
+            onChange={(e) => {
+              const kw = e.target.value.split(',').map(s => s.trim()).filter(Boolean)
+              setConfig(prev => prev ? { ...prev, trigger_keywords: kw } : null)
+            }}
+            placeholder="e.g. book, table, reservation, menu"
+            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+          />
+          <p className="mt-1 text-xs text-muted-foreground">Comma-separated list.</p>
+        </div>
+      </div>
+
+      {/* Right side — Preview */}
+      <div className="hidden w-[340px] shrink-0 lg:block xl:w-[400px]">
+        <div className="sticky top-6 h-full pb-6">
+          <WhatsAppPreview
+            config={config}
+            menuItems={menuItems}
+            fields={fields}
+          />
+        </div>
+      </div>
+
+      <FieldFormDialog
+        open={fieldDialogOpen}
+        onOpenChange={setFieldDialogOpen}
+        initialData={editingField}
+        onSave={handleSaveField}
+      />
+    </div>
+  )
+}

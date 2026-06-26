@@ -2,23 +2,30 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/use-auth";
 import { useTotalUnread } from "@/hooks/use-total-unread";
 import {
+  BarChart3,
+  BookOpen,
+  CalendarCheck,
+  ChevronDown,
   Crown,
   GitBranch,
+  HelpCircle,
   LayoutDashboard,
   LogOut,
   MessageSquare,
   Radio,
   Settings,
   Shield,
+  Truck,
   User,
   UserCog,
   Users,
   UsersRound,
+  UtensilsCrossed,
   Workflow,
   X,
   Zap,
@@ -96,9 +103,21 @@ const navItems: NavItem[] = [
   { href: "/flows", label: "Flows", icon: Workflow, beta: true },
 ];
 
+const restaurantNavItems: NavItem[] = [
+  { href: "/restaurant", label: "Dashboard", icon: BarChart3 },
+  { href: "/restaurant/bookings", label: "Bookings", icon: CalendarCheck },
+  { href: "/restaurant/interactive-flow", label: "Interactive Flow", icon: Workflow },
+  { href: "/restaurant/delivery-platforms", label: "Delivery Platforms", icon: Truck },
+  { href: "/restaurant/faqs", label: "FAQ", icon: HelpCircle },
+  { href: "/restaurant/menu-config", label: "Menu Configuration", icon: BookOpen },
+  { href: "/restaurant/settings", label: "Settings", icon: Settings },
+];
+
 const bottomNavItems = [
   { href: "/settings", label: "Settings", icon: Settings },
 ];
+
+const RESTAURANT_COLLAPSE_KEY = "sidebar_restaurant_collapsed";
 
 interface SidebarProps {
   /** Controlled on mobile by the Header's hamburger button. Ignored on lg+. */
@@ -110,6 +129,29 @@ export function Sidebar({ open = false, onClose }: SidebarProps) {
   const pathname = usePathname();
   const { profile, profileLoading, account, accountRole, signOut } = useAuth();
   const totalUnread = useTotalUnread();
+
+  // Restaurant nav group collapsed state — persisted in localStorage.
+  const [restaurantOpen, setRestaurantOpen] = useState(() => {
+    if (typeof window === "undefined") return true;
+    return localStorage.getItem(RESTAURANT_COLLAPSE_KEY) !== "true";
+  });
+  const toggleRestaurant = useCallback(() => {
+    setRestaurantOpen((prev) => {
+      const next = !prev;
+      localStorage.setItem(RESTAURANT_COLLAPSE_KEY, next ? "false" : "true");
+      return next;
+    });
+  }, []);
+
+  // Auto-expand restaurant nav when a restaurant route is active.
+  const isRestaurantRoute = pathname.startsWith("/restaurant");
+  useEffect(() => {
+    if (isRestaurantRoute && !restaurantOpen) {
+      setRestaurantOpen(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRestaurantRoute]);
+
   // Only surface the account-name strip when it actually carries
   // information. A solo user's personal account is named after them
   // (the 017 signup trigger seeds it from `full_name`), so showing it
@@ -243,6 +285,56 @@ export function Sidebar({ open = false, onClose }: SidebarProps) {
               );
             })}
           </ul>
+
+          {/* ── Restaurant Management ── */}
+          <div className="my-4 border-t border-border" />
+          <div className="mb-1">
+            <button
+              type="button"
+              onClick={toggleRestaurant}
+              className={cn(
+                "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors lg:py-2",
+                isRestaurantRoute
+                  ? "text-primary"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              <UtensilsCrossed className="h-4 w-4" />
+              <span className="flex-1 text-left">Restaurant</span>
+              <ChevronDown
+                className={cn(
+                  "h-3.5 w-3.5 transition-transform duration-200",
+                  restaurantOpen ? "rotate-0" : "-rotate-90",
+                )}
+              />
+            </button>
+            {restaurantOpen && (
+              <ul className="mt-1 flex flex-col gap-0.5 pl-4">
+                {restaurantNavItems.map((item) => {
+                  const isActive =
+                    item.href === "/restaurant"
+                      ? pathname === "/restaurant"
+                      : pathname.startsWith(item.href);
+                  return (
+                    <li key={item.href}>
+                      <Link
+                        href={item.href}
+                        className={cn(
+                          "flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors",
+                          isActive
+                            ? "bg-primary/10 text-primary"
+                            : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                        )}
+                      >
+                        <item.icon className="h-3.5 w-3.5" />
+                        {item.label}
+                      </Link>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
 
           <div className="my-4 border-t border-border" />
 
