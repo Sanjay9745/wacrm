@@ -98,10 +98,11 @@ export function matchesKeywordTrigger(
 ): boolean {
   if (!text || !cfg.keywords?.length) return false;
   const matchType = cfg.match_type ?? "contains";
-  const haystack = cfg.case_sensitive ? text : text.toLowerCase();
+  const haystack = cleanWhatsAppFormatting(cfg.case_sensitive ? text : text.toLowerCase());
   for (const raw of cfg.keywords) {
     if (!raw) continue;
-    const needle = cfg.case_sensitive ? raw : raw.toLowerCase();
+    let needle = cfg.case_sensitive ? raw : raw.toLowerCase();
+    needle = cleanWhatsAppFormatting(needle);
     if (matchType === "exact" ? haystack === needle : haystack.includes(needle)) {
       return true;
     }
@@ -935,7 +936,7 @@ async function handleReplyForActiveRun(
     currentNode.node_type === "collect_input"
   ) {
     const cfg = currentNode.config as unknown as CollectInputNodeConfig;
-    const captured = message.text.trim();
+    const captured = cleanWhatsAppFormatting(message.text);
     if (captured.length > 0 && cfg.var_key) {
       // Persist captured value + reset reprompt count atomically.
       const newVars = { ...run.vars, [cfg.var_key]: captured };
@@ -1114,4 +1115,8 @@ async function startNewRun(
     flow_run_id: run.id,
     outcome: outcome.outcome === "advanced" ? "started" : outcome.outcome,
   };
+}
+
+function cleanWhatsAppFormatting(str: string): string {
+  return str.replace(/^[\*_~`\s]+|[\*_~`\s]+$/g, '').trim();
 }

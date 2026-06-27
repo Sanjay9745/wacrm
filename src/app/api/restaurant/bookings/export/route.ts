@@ -59,7 +59,7 @@ export async function GET(request: Request) {
   // Build CSV
   const headers = ['Booking ID', 'Customer Name', 'Phone', 'Status', ...sortedKeys, 'Notes', 'Created At']
   const rows = bookings.map(b => {
-    const contactName = b.contact?.name ?? ''
+    const contactName = (b.booking_json?.name || b.booking_json?.guest_name || b.contact?.name || '') as string
     const phone = b.phone ?? b.contact?.phone ?? ''
     const dynamicVals = sortedKeys.map(k => {
       const v = b.booking_json?.[k]

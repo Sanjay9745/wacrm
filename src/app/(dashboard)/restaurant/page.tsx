@@ -159,19 +159,19 @@ export default function RestaurantDashboard() {
                       onClick={() => window.location.href = `/restaurant/bookings/${b.id}`}
                     >
                       <td className="px-5 py-3 text-sm font-medium text-foreground">
-                        {json.name || b.contact?.name || '—'}
+                        {json.name || json.guest_name || b.contact?.name || '—'}
                       </td>
                       <td className="px-5 py-3 text-sm text-muted-foreground">
                         {b.phone || b.contact?.phone || '—'}
                       </td>
                       <td className="px-5 py-3 text-sm text-muted-foreground">
-                        {json.date || '—'}
+                        {json.date || json.booking_date || '—'}
                       </td>
                       <td className="px-5 py-3 text-sm text-muted-foreground">
-                        {json.time || '—'}
+                        {json.time || json.booking_time || '—'}
                       </td>
                       <td className="px-5 py-3 text-sm text-muted-foreground">
-                        {json.guests || '—'}
+                        {json.guests || json.guests_count || json.guest_count || '—'}
                       </td>
                       <td className="px-5 py-3">
                         <BookingStatusBadge status={b.status} />

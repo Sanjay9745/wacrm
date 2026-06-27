@@ -59,18 +59,26 @@ export function WhatsAppPreview({ config, menuItems, fields }: WhatsAppPreviewPr
               )}
             </div>
             <div className="border-t border-gray-100 p-2 text-center text-[13px] font-medium text-[#00a884] active:bg-gray-50">
+              Book A Table
+            </div>
+            {(config?.show_latest_booking ?? true) && (
+              <div className="border-t border-gray-100 p-2 text-center text-[13px] font-medium text-[#00a884] active:bg-gray-50">
+                Latest Booking
+              </div>
+            )}
+            <div className="border-t border-gray-100 p-2 text-center text-[13px] font-medium text-[#00a884] active:bg-gray-50">
               {config?.welcome_button_label || 'View Options'}
             </div>
           </div>
         </div>
-
+ 
         {/* Customer Taps View Options */}
         <div className="flex justify-end">
           <div className="rounded-lg rounded-tr-none bg-[#dcf8c6] p-2 px-3 text-[13px] shadow-sm text-[#111]">
             {config?.welcome_button_label || 'View Options'}
           </div>
         </div>
-
+ 
         {/* Main Menu (Interactive List) */}
         <div className="flex justify-start">
           <div className="max-w-[85%] rounded-lg rounded-tl-none bg-white shadow-sm text-[#111] overflow-hidden">
@@ -85,15 +93,26 @@ export function WhatsAppPreview({ config, menuItems, fields }: WhatsAppPreviewPr
             <div className="bg-gray-50 p-2 border-t border-gray-100">
               <p className="text-[11px] font-medium text-gray-500 mb-1 px-1">What would you like to do?</p>
               {enabledMenuItems.length > 0 ? (
-                enabledMenuItems.map((item, idx) => (
-                  <div key={idx} className="flex items-center justify-between p-2 hover:bg-gray-200 rounded border-b border-gray-200/50 last:border-0">
-                    <div>
-                      <p className="text-[13px] font-medium">{item.title}</p>
-                      {item.description && <p className="text-[11px] text-gray-500">{item.description}</p>}
+                <>
+                  {enabledMenuItems.map((item, idx) => (
+                    <div key={idx} className="flex items-center justify-between p-2 hover:bg-gray-200 rounded border-b border-gray-200/50 last:border-0">
+                      <div>
+                        <p className="text-[13px] font-medium">{item.title}</p>
+                        {item.description && <p className="text-[11px] text-gray-500">{item.description}</p>}
+                      </div>
+                      <div className="h-3 w-3 rounded-full border border-gray-300" />
                     </div>
-                    <div className="h-3 w-3 rounded-full border border-gray-300" />
-                  </div>
-                ))
+                  ))}
+                  {config?.show_latest_booking !== false && (
+                    <div className="flex items-center justify-between p-2 hover:bg-gray-200 rounded border-b border-gray-200/50 last:border-0">
+                      <div>
+                        <p className="text-[13px] font-medium">Latest Booking</p>
+                        <p className="text-[11px] text-gray-500">View your latest booking details</p>
+                      </div>
+                      <div className="h-3 w-3 rounded-full border border-gray-300" />
+                    </div>
+                  )}
+                </>
               ) : (
                 <div className="p-2 text-[11px] text-gray-400">No items configured</div>
               )}

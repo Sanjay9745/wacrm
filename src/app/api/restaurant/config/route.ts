@@ -75,6 +75,8 @@ export async function PUT(request: Request) {
     'welcome_header', 'welcome_body', 'welcome_footer',
     'welcome_button_label', 'confirmation_template',
     'is_enabled', 'trigger_keywords', 'session_timeout_minutes',
+    'linked_automation_id', 'show_latest_booking',
+    'start_on_any_message', 'restart_message', 'restart_button_label',
   ]
   for (const key of allowedFields) {
     if (key in body) updateFields[key] = body[key]

@@ -68,7 +68,7 @@ export async function dispatchInboundToRestaurant(
     if (session) {
       // Check session timeout
       const timeoutMs = (config.session_timeout_minutes ?? 30) * 60 * 1000
-      const lastActivity = new Date(session.updated_at).getTime()
+      const lastActivity = new Date(session.last_activity_at).getTime()
       if (Date.now() - lastActivity > timeoutMs) {
         // Session expired — deactivate it
         await deactivateSession(db, session.id)
@@ -80,6 +80,15 @@ export async function dispatchInboundToRestaurant(
       }
     }
 
+    // Check if the message is a "Restart Session" button click.
+    const isRestartClick = input.message.kind === 'interactive_reply' && input.message.reply_id === 'restaurant_restart_session'
+
+    if (isRestartClick) {
+      const newSession = await createSession(db, input)
+      await sendWelcome(db, config, input, newSession)
+      return { consumed: true }
+    }
+
     // 3. No active session — check if message matches a trigger keyword.
     if (input.message.kind !== 'text') {
       return { consumed: false }
@@ -88,12 +97,31 @@ export async function dispatchInboundToRestaurant(
     const keywords: string[] = Array.isArray(config.trigger_keywords)
       ? config.trigger_keywords
       : []
-    if (keywords.length === 0) {
-      return { consumed: false }
+
+    const text = cleanWhatsAppFormatting(input.message.text).toLowerCase()
+    
+    // Check if we should match any incoming message
+    const matchAny = config.start_on_any_message || keywords.length === 0 || keywords.includes('*')
+
+    let matches = false
+    if (matchAny) {
+      matches = true
+    } else {
+      matches = keywords.some((kw) => {
+        let cleanedKw = kw.toLowerCase().trim()
+        let isExact = false
+        if (cleanedKw.startsWith('=')) {
+          isExact = true
+          cleanedKw = cleanedKw.slice(1).trim()
+        }
+        cleanedKw = cleanWhatsAppFormatting(cleanedKw)
+        if (isExact) {
+          return text === cleanedKw
+        }
+        return text.includes(cleanedKw)
+      })
     }
 
-    const text = input.message.text.toLowerCase().trim()
-    const matches = keywords.some((kw) => text.includes(kw.toLowerCase()))
     if (!matches) {
       return { consumed: false }
     }
@@ -171,7 +199,6 @@ async function createSession(
     .from('restaurant_conversation_state')
     .insert({
       account_id: input.accountId,
-      user_id: input.userId,
       contact_id: input.contactId,
       conversation_id: input.conversationId,
       current_step: 'welcome',
@@ -205,7 +232,7 @@ async function updateSession(
     .from('restaurant_conversation_state')
     .update({
       ...updates,
-      updated_at: new Date().toISOString(),
+      last_activity_at: new Date().toISOString(),
     })
     .eq('id', sessionId)
 }
@@ -285,6 +312,21 @@ async function sendWelcome(
   input: RestaurantDispatchInput,
   session: RestaurantConversationState,
 ): Promise<void> {
+  const buttons = [
+    {
+      id: 'restaurant_welcome_book_table',
+      title: 'Book A Table',
+    },
+    {
+      id: 'restaurant_welcome_latest_booking',
+      title: 'Latest Booking',
+    },
+    {
+      id: 'restaurant_welcome_view_options',
+      title: (config.welcome_button_label || 'View Options').slice(0, 20),
+    },
+  ]
+
   await engineSendInteractiveButtons({
     accountId: input.accountId,
     userId: input.userId,
@@ -292,14 +334,29 @@ async function sendWelcome(
     contactId: input.contactId,
     bodyText: `*${config.welcome_header}*\n\n${config.welcome_body}`,
     footerText: config.welcome_footer || undefined,
-    buttons: [
-      {
-        id: 'restaurant_view_options',
-        title: config.welcome_button_label || 'View Options',
-      },
-    ],
+    buttons,
   })
   await updateSession(db, session.id, { current_step: 'awaiting_welcome_tap' })
+}
+
+async function startBookingFlow(
+  db: AdminClient,
+  input: RestaurantDispatchInput,
+  session: RestaurantConversationState,
+): Promise<void> {
+  const fields = await loadBookingFields(db, input.accountId)
+  if (fields.length === 0) {
+    await engineSendText({
+      accountId: input.accountId,
+      userId: input.userId,
+      conversationId: input.conversationId,
+      contactId: input.contactId,
+      text: 'Table booking is not configured yet. Please try again later.',
+    })
+    await deactivateSession(db, session.id)
+    return
+  }
+  await sendBookingField(db, input, session, fields, 0)
 }
 
 async function sendMainMenu(
@@ -320,6 +377,21 @@ async function sendMainMenu(
     return
   }
 
+  const rows = items.map((item) => ({
+    id: `restaurant_menu_${item.action_type}`,
+    title: item.title.slice(0, 24),
+    description: item.description ? item.description.slice(0, 72) : undefined,
+  }))
+
+  const config = await loadConfig(db, input.accountId)
+  if (!config || config.show_latest_booking !== false) {
+    rows.push({
+      id: 'restaurant_menu_latest_booking',
+      title: 'Latest Booking',
+      description: 'View your latest booking details',
+    })
+  }
+
   await engineSendInteractiveList({
     accountId: input.accountId,
     userId: input.userId,
@@ -329,12 +401,8 @@ async function sendMainMenu(
     buttonLabel: 'Our Services',
     sections: [
       {
-        title: 'What would you like to do?',
-        rows: items.map((item) => ({
-          id: `restaurant_menu_${item.action_type}`,
-          title: item.title,
-          description: item.description || undefined,
-        })),
+        title: 'Choose an option',
+        rows,
       },
     ],
   })
@@ -356,11 +424,67 @@ async function sendBookingField(
 
   const field = fields[fieldIndex]
 
-  if (INTERACTIVE_FIELD_TYPES.has(field.field_type)) {
-    // Send as interactive list
+  if (field.field_type === 'date') {
+    // Generate next 7 days for the interactive list
+    const dates: string[] = []
+    for (let i = 0; i < 7; i++) {
+      const d = new Date()
+      d.setDate(d.getDate() + i)
+      if (i === 0) dates.push('Today')
+      else if (i === 1) dates.push('Tomorrow')
+      else {
+        const formatted = d.toLocaleDateString('en-US', {
+          weekday: 'long',
+          month: 'short',
+          day: 'numeric',
+        })
+        dates.push(formatted)
+      }
+    }
+
+    const rows = [
+      {
+        id: `restaurant_field_${field.field_name}_custom`,
+        title: 'Type custom date',
+      },
+      ...dates.map((opt, i) => ({
+        id: `restaurant_field_${field.field_name}_${i}`,
+        title: opt.slice(0, 24),
+      })),
+    ]
+
+    await engineSendInteractiveList({
+      accountId: input.accountId,
+      userId: input.userId,
+      conversationId: input.conversationId,
+      contactId: input.contactId,
+      bodyText: `Please select your ${field.field_label}:`,
+      buttonLabel: 'Choose Date',
+      sections: [{ title: 'Available Dates', rows }],
+    })
+  } else if (field.field_type === 'time') {
+    const options = [
+      '12:00 PM', '1:00 PM', '2:00 PM',
+      '7:00 PM', '8:00 PM', '9:00 PM',
+      'Type custom time'
+    ]
+    const rows = options.map((opt, i) => ({
+      id: i === 6 ? `restaurant_field_${field.field_name}_custom` : `restaurant_field_${field.field_name}_${i}`,
+      title: opt,
+    }))
+
+    await engineSendInteractiveList({
+      accountId: input.accountId,
+      userId: input.userId,
+      conversationId: input.conversationId,
+      contactId: input.contactId,
+      bodyText: `Please select your ${field.field_label}:`,
+      buttonLabel: 'Choose Time',
+      sections: [{ title: 'Common Times', rows }],
+    })
+  } else if (field.field_type === 'buttons') {
     const options: string[] = Array.isArray(field.options) ? field.options : []
     if (options.length === 0) {
-      // No options configured — skip and ask as text
       await engineSendText({
         accountId: input.accountId,
         userId: input.userId,
@@ -369,7 +493,46 @@ async function sendBookingField(
         text: `Please enter your ${field.field_label}:`,
       })
     } else {
-      // WhatsApp list messages support max 10 rows. If more, chunk.
+      const buttons = options.slice(0, 3).map((opt, i) => ({
+        id: `restaurant_field_${field.field_name}_${i}`,
+        title: (typeof opt === 'string' ? opt : String(opt)).slice(0, 20),
+      }))
+
+      await engineSendInteractiveButtons({
+        accountId: input.accountId,
+        userId: input.userId,
+        conversationId: input.conversationId,
+        contactId: input.contactId,
+        bodyText: `Please select your ${field.field_label}:`,
+        buttons,
+      })
+    }
+  } else if (INTERACTIVE_FIELD_TYPES.has(field.field_type)) {
+    const options: string[] = Array.isArray(field.options) ? field.options : []
+    if (options.length === 0) {
+      await engineSendText({
+        accountId: input.accountId,
+        userId: input.userId,
+        conversationId: input.conversationId,
+        contactId: input.contactId,
+        text: `Please enter your ${field.field_label}:`,
+      })
+    } else if (options.length <= 3) {
+      // Send as buttons
+      const buttons = options.slice(0, 3).map((opt, i) => ({
+        id: `restaurant_field_${field.field_name}_${i}`,
+        title: (typeof opt === 'string' ? opt : String(opt)).slice(0, 20),
+      }))
+
+      await engineSendInteractiveButtons({
+        accountId: input.accountId,
+        userId: input.userId,
+        conversationId: input.conversationId,
+        contactId: input.contactId,
+        bodyText: `Please select your ${field.field_label}:`,
+        buttons,
+      })
+    } else {
       const rows = options.slice(0, 10).map((opt, i) => ({
         id: `restaurant_field_${field.field_name}_${i}`,
         title: typeof opt === 'string' ? opt.slice(0, 24) : String(opt).slice(0, 24),
@@ -381,8 +544,8 @@ async function sendBookingField(
         conversationId: input.conversationId,
         contactId: input.contactId,
         bodyText: `Please select your ${field.field_label}:`,
-        buttonLabel: `Choose ${field.field_label}`,
-        sections: [{ title: field.field_label, rows }],
+        buttonLabel: `Choose ${field.field_label}`.slice(0, 20),
+        sections: [{ title: field.field_label.slice(0, 24), rows }],
       })
     }
   } else {
@@ -412,10 +575,27 @@ async function sendConfirmation(
   const config = await loadConfig(db, input.accountId)
   if (!config) return
 
+  // Upgrade template to WhatsApp markdown formatting dynamically
+  let template = config.confirmation_template || 'Your booking has been received.'
+  template = template
+    .replace('Thank you! 🎉', '*Thank you!* 🎉')
+    .replace('📅 Date:', '📅 *Date:*')
+    .replace('🕐 Time:', '🕐 *Time:*')
+    .replace('👥 Guests:', '👥 *Guests:*')
+
   // Interpolate collected data into the confirmation template
-  const template = config.confirmation_template || 'Your booking has been received.'
   const data = session.collected_data as Record<string, string>
   const text = template.replace(/\{\{(\w+)\}\}/g, (_, key: string) => {
+    const k = key.toLowerCase().trim()
+    if (k === 'date' || k === 'booking_date') {
+      return data['booking_date'] ?? data['date'] ?? ''
+    }
+    if (k === 'time' || k === 'booking_time') {
+      return data['booking_time'] ?? data['time'] ?? ''
+    }
+    if (k === 'guests' || k === 'guests_count' || k === 'guest_count') {
+      return data['guests_count'] ?? data['guests'] ?? data['guest_count'] ?? ''
+    }
     return data[key] ?? ''
   })
 
@@ -443,6 +623,22 @@ async function sendConfirmation(
     contactId: input.contactId,
     text,
   })
+
+  // Send restart session option buttons
+  await engineSendInteractiveButtons({
+    accountId: input.accountId,
+    userId: input.userId,
+    conversationId: input.conversationId,
+    contactId: input.contactId,
+    bodyText: config.restart_message || 'Thank you! Your booking is received. Click below to start over.',
+    buttons: [
+      {
+        id: 'restaurant_restart_session',
+        title: (config.restart_button_label || 'Restart Session').slice(0, 20),
+      },
+    ],
+  })
+
 
   await deactivateSession(db, session.id)
 }
@@ -478,8 +674,8 @@ async function sendDeliveryPlatforms(
         title: 'Delivery Platforms',
         rows: platforms.map((p) => ({
           id: `restaurant_delivery_${p.id}`,
-          title: p.name,
-          description: p.url ? 'Tap to get link' : undefined,
+          title: p.name.slice(0, 24),
+          description: p.url ? 'Tap to get link'.slice(0, 72) : undefined,
         })),
       },
     ],
@@ -514,7 +710,7 @@ async function sendFaqList(
     buttonLabel: 'View Questions',
     sections: [
       {
-        title: 'Frequently Asked Questions',
+        title: 'Common Questions',
         rows: faqs.slice(0, 10).map((faq) => ({
           id: `restaurant_faq_${faq.id}`,
           title: faq.question.slice(0, 24),
@@ -582,12 +778,22 @@ async function handleReply(
 
   // ---- Welcome tap ----
   if (step === 'awaiting_welcome_tap') {
-    if (
-      message.kind === 'interactive_reply' &&
-      message.reply_id === 'restaurant_view_options'
-    ) {
-      await sendMainMenu(db, input, session)
-      return
+    if (message.kind === 'interactive_reply') {
+      if (message.reply_id === 'restaurant_welcome_book_table') {
+        await startBookingFlow(db, input, session)
+        return
+      }
+      if (
+        message.reply_id === 'restaurant_welcome_view_options' ||
+        message.reply_id === 'restaurant_view_options'
+      ) {
+        await sendMainMenu(db, input, session)
+        return
+      }
+      if (message.reply_id === 'restaurant_welcome_latest_booking') {
+        await sendLatestBooking(db, input, session)
+        return
+      }
     }
     // Invalid reply — re-send welcome
     await sendWelcome(db, config, input, session)
@@ -604,20 +810,7 @@ async function handleReply(
 
     const replyId = message.reply_id
     if (replyId === 'restaurant_menu_book_table') {
-      // Start booking flow
-      const fields = await loadBookingFields(db, input.accountId)
-      if (fields.length === 0) {
-        await engineSendText({
-          accountId: input.accountId,
-          userId: input.userId,
-          conversationId: input.conversationId,
-          contactId: input.contactId,
-          text: 'Table booking is not configured yet. Please try again later.',
-        })
-        await deactivateSession(db, session.id)
-        return
-      }
-      await sendBookingField(db, input, session, fields, 0)
+      await startBookingFlow(db, input, session)
       return
     }
     if (replyId === 'restaurant_menu_order_online') {
@@ -630,6 +823,10 @@ async function handleReply(
     }
     if (replyId === 'restaurant_menu_faq') {
       await sendFaqList(db, input, session)
+      return
+    }
+    if (replyId === 'restaurant_menu_latest_booking') {
+      await sendLatestBooking(db, input, session)
       return
     }
 
@@ -653,7 +850,114 @@ async function handleReply(
     // Extract the answer
     let answer: string | null = null
 
-    if (INTERACTIVE_FIELD_TYPES.has(field.field_type) && message.kind === 'interactive_reply') {
+    if (field.field_type === 'date') {
+      if (message.kind === 'interactive_reply') {
+        const replyId = message.reply_id
+        if (replyId === `restaurant_field_${field.field_name}_custom`) {
+          await engineSendText({
+            accountId: input.accountId,
+            userId: input.userId,
+            conversationId: input.conversationId,
+            contactId: input.contactId,
+            text: `Please type your booking date:`,
+          })
+          await engineSendText({
+            accountId: input.accountId,
+            userId: input.userId,
+            conversationId: input.conversationId,
+            contactId: input.contactId,
+            text: `Format: *DD/MM/YYYY* (e.g. *26/06/2026* or *"tomorrow"*)`,
+          })
+          return
+        }
+        
+        const prefix = `restaurant_field_${field.field_name}_`
+        if (replyId.startsWith(prefix)) {
+          const idx = parseInt(replyId.slice(prefix.length), 10)
+          const options: string[] = []
+          for (let i = 0; i < 7; i++) {
+            const d = new Date()
+            d.setDate(d.getDate() + i)
+            if (i === 0) options.push('Today')
+            else if (i === 1) options.push('Tomorrow')
+            else {
+              options.push(d.toLocaleDateString('en-US', {
+                weekday: 'long',
+                month: 'short',
+                day: 'numeric',
+              }))
+            }
+          }
+          answer = options[idx] ?? message.reply_title
+        } else {
+          answer = message.reply_title
+        }
+      } else if (message.kind === 'text') {
+        answer = cleanWhatsAppFormatting(message.text)
+        if (!isValidDate(answer)) {
+          await engineSendText({
+            accountId: input.accountId,
+            userId: input.userId,
+            conversationId: input.conversationId,
+            contactId: input.contactId,
+            text: `❌ Invalid date format. Please enter a valid date (e.g. *26/06/2026* or *"tomorrow"*):`,
+          })
+          return
+        }
+      }
+    } else if (field.field_type === 'time') {
+      if (message.kind === 'interactive_reply') {
+        const replyId = message.reply_id
+        if (replyId === `restaurant_field_${field.field_name}_custom`) {
+          await engineSendText({
+            accountId: input.accountId,
+            userId: input.userId,
+            conversationId: input.conversationId,
+            contactId: input.contactId,
+            text: `Please type your booking time (e.g., *7:30 PM* or *19:30*):`,
+          })
+          return
+        }
+        
+        const prefix = `restaurant_field_${field.field_name}_`
+        if (replyId.startsWith(prefix)) {
+          const idx = parseInt(replyId.slice(prefix.length), 10)
+          const options = [
+            '12:00 PM', '1:00 PM', '2:00 PM',
+            '7:00 PM', '8:00 PM', '9:00 PM'
+          ]
+          answer = options[idx] ?? message.reply_title
+        } else {
+          answer = message.reply_title
+        }
+      } else if (message.kind === 'text') {
+        answer = cleanWhatsAppFormatting(message.text)
+        if (!isValidTime(answer)) {
+          await engineSendText({
+            accountId: input.accountId,
+            userId: input.userId,
+            conversationId: input.conversationId,
+            contactId: input.contactId,
+            text: `❌ Invalid time format. Please enter a valid time (e.g. *7:30 PM* or *19:30*):`,
+          })
+          return
+        }
+      }
+    } else if (field.field_type === 'number') {
+      if (message.kind === 'text') {
+        answer = cleanWhatsAppFormatting(message.text)
+        if (!isValidNumber(answer)) {
+          await engineSendText({
+            accountId: input.accountId,
+            userId: input.userId,
+            conversationId: input.conversationId,
+            contactId: input.contactId,
+            text: `❌ Invalid number. Please enter a valid number for ${field.field_label} (e.g., *4*):`,
+          })
+          return
+        }
+      }
+    } else if (INTERACTIVE_FIELD_TYPES.has(field.field_type) && message.kind === 'interactive_reply') {
       // Interactive reply — extract the title as the answer
       const replyId = message.reply_id
       const prefix = `restaurant_field_${field.field_name}_`
@@ -665,7 +969,7 @@ async function handleReply(
         answer = message.reply_title
       }
     } else if (message.kind === 'text') {
-      answer = message.text.trim()
+      answer = cleanWhatsAppFormatting(message.text)
     } else if (message.kind === 'interactive_reply') {
       // Got interactive reply for a text field — use the title
       answer = message.reply_title
@@ -788,4 +1092,129 @@ async function handleReply(
   // ---- Unknown step — deactivate and ignore ----
   console.warn('[restaurant] unknown step:', step)
   await deactivateSession(db, session.id)
+}
+
+function isValidDate(str: string): boolean {
+  const s = cleanWhatsAppFormatting(str).toLowerCase()
+  if (s === 'today' || s === 'tomorrow' || s === 'day after tomorrow') return true
+  
+  const regex1 = /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/
+  const regex2 = /^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/
+  
+  if (regex1.test(s)) {
+    const match = s.match(regex1)
+    if (match) {
+      const day = parseInt(match[1], 10)
+      const month = parseInt(match[2], 10)
+      const year = parseInt(match[3], 10)
+      const date = new Date(year, month - 1, day)
+      return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day
+    }
+  }
+  
+  if (regex2.test(s)) {
+    const match = s.match(regex2)
+    if (match) {
+      const year = parseInt(match[1], 10)
+      const month = parseInt(match[2], 10)
+      const day = parseInt(match[3], 10)
+      const date = new Date(year, month - 1, day)
+      return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day
+    }
+  }
+  
+  const timestamp = Date.parse(cleanWhatsAppFormatting(str))
+  return !isNaN(timestamp)
+}
+
+function isValidTime(str: string): boolean {
+  const s = cleanWhatsAppFormatting(str).toLowerCase()
+  const regex12 = /^(0?[1-9]|1[0-2]):[0-5][0-9]\s*(am|pm)$/
+  const regex24 = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/
+  
+  return regex12.test(s) || regex24.test(s)
+}
+
+function isValidNumber(str: string): boolean {
+  const s = cleanWhatsAppFormatting(str)
+  const num = Number(s)
+  return !isNaN(num) && Number.isInteger(num) && num > 0
+}
+
+function cleanWhatsAppFormatting(str: string): string {
+  return str.replace(/^[\*_~`\s]+|[\*_~`\s]+$/g, '').trim()
+}
+
+async function sendLatestBooking(
+  db: AdminClient,
+  input: RestaurantDispatchInput,
+  session: RestaurantConversationState,
+): Promise<void> {
+  const { data: bookings, error } = await db
+    .from('restaurant_bookings')
+    .select('*')
+    .eq('contact_id', input.contactId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+
+  if (error) {
+    console.error('[restaurant] error fetching latest booking:', error.message)
+  }
+
+  const booking = bookings?.[0]
+  if (!booking) {
+    await engineSendText({
+      accountId: input.accountId,
+      userId: input.userId,
+      conversationId: input.conversationId,
+      contactId: input.contactId,
+      text: `You don't have any bookings yet. Click *New Booking* below to make one!`,
+    })
+    const config = await loadConfig(db, input.accountId)
+    if (config) {
+      await sendWelcome(db, config, input, session)
+    }
+    return
+  }
+
+  const data = (booking.booking_json || {}) as Record<string, string>
+  
+  const statusLabels: Record<string, string> = {
+    pending: 'Pending ⏳',
+    confirmed: 'Confirmed ✅',
+    cancelled: 'Cancelled ❌',
+    no_show: 'No Show 🚫',
+  }
+  const statusStr = statusLabels[booking.status] ?? booking.status
+
+  const bookingDate = data['booking_date'] ?? data['date'] ?? 'N/A'
+  const bookingTime = data['booking_time'] ?? data['time'] ?? 'N/A'
+  const guests = data['guests_count'] ?? data['guests'] ?? data['guest_count'] ?? 'N/A'
+
+  const mainKeys = new Set(['date', 'booking_date', 'time', 'booking_time', 'guests', 'guests_count', 'guest_count'])
+  let extraFieldsStr = ''
+  for (const [key, value] of Object.entries(data)) {
+    if (!mainKeys.has(key.toLowerCase()) && value) {
+      const label = key
+        .split('_')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ')
+      extraFieldsStr += `\n*${label}:* ${value}`
+    }
+  }
+
+  const text = `*Your Latest Booking Details:*\n\n📅 *Date:* ${bookingDate}\n🕐 *Time:* ${bookingTime}\n👥 *Guests:* ${guests}${extraFieldsStr}\n\n*Status:* ${statusStr}`
+
+  await engineSendText({
+    accountId: input.accountId,
+    userId: input.userId,
+    conversationId: input.conversationId,
+    contactId: input.contactId,
+    text,
+  })
+
+  const config = await loadConfig(db, input.accountId)
+  if (config) {
+    await sendWelcome(db, config, input, session)
+  }
 }

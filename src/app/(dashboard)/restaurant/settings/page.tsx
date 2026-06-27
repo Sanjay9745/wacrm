@@ -11,6 +11,7 @@ export default function RestaurantSettingsPage() {
   const [toggling, setToggling] = useState(false)
   const [seeding, setSeeding] = useState(false)
   const [seedingConfig, setSeedingConfig] = useState(false)
+  const [linkedAutomationId, setLinkedAutomationId] = useState<string | null>(null)
   const [seedCount, setSeedCount] = useState(500)
   const [seedResult, setSeedResult] = useState<{ count?: number, errors?: string[] } | null>(null)
 
@@ -21,6 +22,7 @@ export default function RestaurantSettingsPage() {
         const data = await res.json()
         if (data.config) {
           setIsEnabled(data.config.is_enabled)
+          setLinkedAutomationId(data.config.linked_automation_id ?? null)
         }
       } catch (err) {
         console.error('Failed to load restaurant config:', err)
@@ -35,6 +37,29 @@ export default function RestaurantSettingsPage() {
     setToggling(true)
     setIsEnabled(checked)
     try {
+      // If toggling OFF and there's a linked automation, ask to disable it
+      if (!checked && linkedAutomationId) {
+        const disableAuto = confirm(
+          'Do you also want to disable the linked Restaurant Booking automation?'
+        )
+        if (disableAuto) {
+          await fetch(`/api/automations/${linkedAutomationId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ is_active: false }),
+          })
+        }
+      }
+
+      // If toggling ON and there's a linked automation, re-enable it
+      if (checked && linkedAutomationId) {
+        await fetch(`/api/automations/${linkedAutomationId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ is_active: true }),
+        })
+      }
+
       const res = await fetch('/api/restaurant/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -68,6 +93,7 @@ export default function RestaurantSettingsPage() {
       if (data.success) {
         alert('Successfully set up the default restaurant flow configuration. The module is now ON and ready to use.')
         setIsEnabled(true)
+        if (data.automationId) setLinkedAutomationId(data.automationId)
       } else {
         alert(`Failed to set up configuration: ${data.error}`)
       }
@@ -153,29 +179,6 @@ export default function RestaurantSettingsPage() {
         </div>
       </div>
 
-      {/* Setup Default Flow Config */}
-      <div className="rounded-xl border border-border bg-card p-6">
-        <div className="flex items-center justify-between gap-4 flex-wrap">
-          <div className="space-y-1 max-w-md">
-            <h2 className="text-lg font-semibold text-foreground flex items-center gap-2">
-              <RefreshCw className="h-5 w-5 text-primary" />
-              Setup Default Configuration
-            </h2>
-            <p className="text-sm text-muted-foreground">
-              Automatically create the default Menu Items, Booking Fields, FAQs, and Delivery Platforms required for the Restaurant Flow. 
-              <strong> Warning: This will delete your existing configuration.</strong>
-            </p>
-          </div>
-          <button
-            onClick={handleSeedConfig}
-            disabled={seedingConfig}
-            className="inline-flex items-center gap-2 rounded-lg bg-secondary px-4 py-2 text-sm font-medium text-secondary-foreground hover:bg-secondary/90 transition-colors disabled:opacity-50"
-          >
-            <RefreshCw className={`h-4 w-4 ${seedingConfig ? 'animate-spin' : ''}`} />
-            {seedingConfig ? 'Setting up...' : 'Setup Default Flow'}
-          </button>
-        </div>
-      </div>
 
       {!isProduction && (
         <div className="rounded-xl border border-border bg-card p-6">

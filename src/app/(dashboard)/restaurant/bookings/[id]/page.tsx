@@ -146,7 +146,7 @@ export default function BookingDetailPage() {
               <div className="flex items-center justify-between">
                 <span className="text-sm text-muted-foreground">Name</span>
                 <span className="text-sm font-medium text-foreground">
-                  {json.name || contact?.name || '—'}
+                  {json.name || json.guest_name || contact?.name || '—'}
                 </span>
               </div>
               <div className="flex items-center justify-between">

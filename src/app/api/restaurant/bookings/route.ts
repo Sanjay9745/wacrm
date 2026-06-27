@@ -35,7 +35,9 @@ export async function GET(request: Request) {
     .eq('account_id', guard.accountId)
 
   if (status) query = query.eq('status', status)
-  if (search) query = query.or(`phone.ilike.%${search}%,booking_json->>name.ilike.%${search}%`)
+  if (search) {
+    query = query.or(`phone.ilike.%${search}%,booking_json->>name.ilike.%${search}%,booking_json->>guest_name.ilike.%${search}%`)
+  }
   if (dateFrom) query = query.gte('created_at', dateFrom)
   if (dateTo) query = query.lte('created_at', dateTo)
 

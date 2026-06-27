@@ -28,6 +28,7 @@ export type BookingFieldType =
   | 'time'
   | 'checkbox'
   | 'radio'
+  | 'buttons'
 
 export type MenuActionType =
   | 'book_table'
@@ -70,6 +71,7 @@ export const FIELD_TYPE_LABELS: Record<BookingFieldType, string> = {
   time: 'Time',
   checkbox: 'Checkbox',
   radio: 'Radio',
+  buttons: 'Buttons',
 }
 
 /**
@@ -80,6 +82,7 @@ export const INTERACTIVE_FIELD_TYPES: ReadonlySet<BookingFieldType> = new Set([
   'dropdown',
   'single_select',
   'radio',
+  'buttons',
 ])
 
 // ---- DB row shapes ----
@@ -96,6 +99,11 @@ export interface RestaurantConfig {
   is_enabled: boolean
   trigger_keywords: string[]
   session_timeout_minutes: number
+  linked_automation_id: string | null
+  show_latest_booking: boolean
+  start_on_any_message: boolean
+  restart_message: string
+  restart_button_label: string
   created_at: string
   updated_at: string
 }
@@ -199,8 +207,8 @@ export interface RestaurantConversationState {
   current_step: string
   collected_data: Record<string, unknown>
   current_field_index: number
-  created_at: string
-  updated_at: string
+  started_at: string
+  last_activity_at: string
   is_active: boolean
 }
 

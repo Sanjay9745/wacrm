@@ -20,6 +20,7 @@ export default function InteractiveFlowPage() {
   const [config, setConfig] = useState<RestaurantConfig | null>(null)
   const [menuItems, setMenuItems] = useState<RestaurantMenuItem[]>([])
   const [fields, setFields] = useState<RestaurantBookingField[]>([])
+  const [keywordsInput, setKeywordsInput] = useState('')
 
   // Dialog state
   const [fieldDialogOpen, setFieldDialogOpen] = useState(false)
@@ -38,6 +39,9 @@ export default function InteractiveFlowPage() {
         fieldsRes.json(),
       ])
       setConfig(conf.config)
+      if (conf.config?.trigger_keywords) {
+        setKeywordsInput(conf.config.trigger_keywords.join(', '))
+      }
       setMenuItems(menu.items || [])
       setFields(flds.fields || [])
     } catch (err) {
@@ -214,7 +218,7 @@ export default function InteractiveFlowPage() {
         {/* Welcome Message Settings */}
         <div className="rounded-xl border border-border bg-card p-5">
           <h2 className="text-base font-semibold text-foreground">Welcome Message</h2>
-          <p className="mb-4 text-sm text-muted-foreground">Customize the initial greeting.</p>
+          <p className="mb-4 text-sm text-muted-foreground">Customize the initial greeting and interactive buttons.</p>
           
           <div className="grid gap-4">
             <div>
@@ -246,13 +250,68 @@ export default function InteractiveFlowPage() {
                 />
               </div>
               <div>
-                <label className="text-xs font-medium text-foreground">Button Label</label>
+                <label className="text-xs font-medium text-foreground">"View Options" Button Label</label>
                 <input
                   type="text"
                   value={config?.welcome_button_label || ''}
                   onChange={(e) => setConfig(prev => prev ? { ...prev, welcome_button_label: e.target.value } : null)}
                   className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
                 />
+              </div>
+            </div>
+            
+            {/* Welcome Buttons Configuration */}
+            <div className="border-t border-border pt-4">
+              <h3 className="text-sm font-semibold text-foreground mb-3">Welcome Buttons</h3>
+              <p className="text-xs text-muted-foreground mb-3">
+                These buttons appear on the welcome message. Customers tap one to start their journey.
+              </p>
+              
+              <div className="space-y-2">
+                {/* Book A Table button (always shown) */}
+                <div className="flex items-center gap-3 rounded-lg border border-border bg-background px-3 py-2.5">
+                  <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10">
+                    <span className="text-xs font-bold text-primary">1</span>
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-foreground">Book A Table</p>
+                    <p className="text-xs text-muted-foreground">Starts the booking flow</p>
+                  </div>
+                  <span className="rounded bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">Always visible</span>
+                </div>
+
+                {/* Latest Booking button (togglable) */}
+                <div className="flex items-center gap-3 rounded-lg border border-border bg-background px-3 py-2.5">
+                  <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10">
+                    <span className="text-xs font-bold text-primary">2</span>
+                  </div>
+                  <div className="flex-1">
+                    <p className={cn("text-sm font-medium", (config?.show_latest_booking ?? true) ? "text-foreground" : "text-muted-foreground line-through")}>
+                      Latest Booking
+                    </p>
+                    <p className="text-xs text-muted-foreground">Shows the customer's most recent booking</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={config?.show_latest_booking ?? true}
+                    onChange={(e) => setConfig(prev => prev ? { ...prev, show_latest_booking: e.target.checked } : null)}
+                    className="h-4 w-4 rounded border-border text-primary focus:ring-primary bg-background cursor-pointer"
+                  />
+                </div>
+
+                {/* View Options button (always shown) */}
+                <div className="flex items-center gap-3 rounded-lg border border-border bg-background px-3 py-2.5">
+                  <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10">
+                    <span className="text-xs font-bold text-primary">3</span>
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-foreground">
+                      {config?.welcome_button_label || 'View Options'}
+                    </p>
+                    <p className="text-xs text-muted-foreground">Opens the main menu</p>
+                  </div>
+                  <span className="rounded bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">Always visible</span>
+                </div>
               </div>
             </div>
           </div>
@@ -371,33 +430,80 @@ export default function InteractiveFlowPage() {
         </div>
 
         {/* Confirmation Message */}
-        <div className="rounded-xl border border-border bg-card p-5">
-          <h2 className="text-base font-semibold text-foreground">Confirmation Message</h2>
-          <p className="mb-4 text-sm text-muted-foreground">Sent after customer completes the flow.</p>
-          <textarea
-            value={config?.confirmation_template || ''}
-            onChange={(e) => setConfig(prev => prev ? { ...prev, confirmation_template: e.target.value } : null)}
-            rows={3}
-            placeholder="Thank you for booking..."
-            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary resize-none"
-          />
+        <div className="rounded-xl border border-border bg-card p-5 space-y-4">
+          <div>
+            <h2 className="text-base font-semibold text-foreground">Confirmation Message</h2>
+            <p className="mb-2 text-sm text-muted-foreground">Sent after customer completes the flow.</p>
+            <textarea
+              value={config?.confirmation_template || ''}
+              onChange={(e) => setConfig(prev => prev ? { ...prev, confirmation_template: e.target.value } : null)}
+              rows={3}
+              placeholder="Thank you for booking..."
+              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary resize-none"
+            />
+          </div>
+
+          <div className="border-t border-border pt-4 grid gap-4">
+            <div>
+              <h3 className="text-sm font-semibold text-foreground">Restart Session Option</h3>
+              <p className="mb-2 text-xs text-muted-foreground">Interactive prompt sent after booking completes to allow restarting the conversation.</p>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-foreground">Restart Prompt Message</label>
+              <textarea
+                value={config?.restart_message || ''}
+                onChange={(e) => setConfig(prev => prev ? { ...prev, restart_message: e.target.value } : null)}
+                rows={2}
+                placeholder="Click below to start over."
+                className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary resize-none"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-medium text-foreground">Restart Button Label</label>
+              <input
+                type="text"
+                value={config?.restart_button_label || ''}
+                onChange={(e) => setConfig(prev => prev ? { ...prev, restart_button_label: e.target.value } : null)}
+                placeholder="Restart Session"
+                className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+              />
+            </div>
+          </div>
         </div>
 
         {/* Trigger Keywords */}
-        <div className="rounded-xl border border-border bg-card p-5">
-          <h2 className="text-base font-semibold text-foreground">Trigger Keywords</h2>
-          <p className="mb-4 text-sm text-muted-foreground">Keywords that start this flow when a customer sends a message.</p>
-          <input
-            type="text"
-            value={config?.trigger_keywords?.join(', ') || ''}
-            onChange={(e) => {
-              const kw = e.target.value.split(',').map(s => s.trim()).filter(Boolean)
-              setConfig(prev => prev ? { ...prev, trigger_keywords: kw } : null)
-            }}
-            placeholder="e.g. book, table, reservation, menu"
-            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
-          />
-          <p className="mt-1 text-xs text-muted-foreground">Comma-separated list.</p>
+        <div className="rounded-xl border border-border bg-card p-5 space-y-4">
+          <div>
+            <h2 className="text-base font-semibold text-foreground">Trigger Keywords</h2>
+            <p className="mb-2 text-sm text-muted-foreground">Keywords that start this flow when a customer sends a message.</p>
+            <input
+              type="text"
+              value={keywordsInput}
+              onChange={(e) => {
+                const val = e.target.value
+                setKeywordsInput(val)
+                const kw = val.split(',').map(s => s.trim()).filter(Boolean)
+                setConfig(prev => prev ? { ...prev, trigger_keywords: kw } : null)
+              }}
+              placeholder="e.g. book, table, reservation, menu"
+              disabled={config?.start_on_any_message ?? false}
+              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
+            />
+            <p className="mt-1 text-xs text-muted-foreground">Comma-separated list.</p>
+          </div>
+
+          <div className="flex items-center gap-2 border-t border-border pt-4">
+            <input
+              type="checkbox"
+              id="start_on_any_message"
+              checked={config?.start_on_any_message ?? false}
+              onChange={(e) => setConfig(prev => prev ? { ...prev, start_on_any_message: e.target.checked } : null)}
+              className="h-4 w-4 rounded border-border text-primary focus:ring-primary bg-background cursor-pointer"
+            />
+            <label htmlFor="start_on_any_message" className="text-sm font-medium text-foreground cursor-pointer">
+              Start conversation when any message comes (ignores keywords)
+            </label>
+          </div>
         </div>
       </div>
 
