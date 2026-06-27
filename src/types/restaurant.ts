@@ -104,6 +104,20 @@ export interface RestaurantConfig {
   start_on_any_message: boolean
   restart_message: string
   restart_button_label: string
+  /** Earliest bookable time, e.g. "11:00 AM" */
+  booking_time_from: string
+  /** Latest bookable time, e.g. "9:00 PM" */
+  booking_time_to: string
+  /** How many days ahead to show in the date picker */
+  booking_date_range_days: number
+  /** Minimum minutes from "now" before a time slot is available */
+  booking_time_buffer_minutes: number
+  /** Block all bookings for today */
+  block_today_booking: boolean
+  /** Timestamp when today was blocked */
+  block_today_timestamp: string | null
+  /** Custom message shown when today is blocked */
+  block_today_message: string
   created_at: string
   updated_at: string
 }

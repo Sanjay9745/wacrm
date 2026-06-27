@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
-import { Plus, Edit2, Trash2, Save, Eye, EyeOff } from 'lucide-react'
+import { Plus, Edit2, Trash2, Save, Eye, EyeOff, Clock } from 'lucide-react'
 import { SortableList } from '@/components/restaurant/sortable-list'
 import { FieldFormDialog } from '@/components/restaurant/field-form-dialog'
 import { WhatsAppPreview } from '@/components/restaurant/whatsapp-preview'
@@ -427,6 +427,113 @@ export default function InteractiveFlowPage() {
               )}
             />
           )}
+        </div>
+
+        {/* Booking Date & Time Restrictions */}
+        <div className="rounded-xl border border-border bg-card p-5 space-y-5">
+          <div>
+            <h2 className="text-base font-semibold text-foreground">Booking Date & Time Restrictions</h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Control when customers can book — time windows, date ranges, and today-booking rules.
+            </p>
+          </div>
+
+          {/* Time Window */}
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="text-xs font-medium text-foreground">Booking From</label>
+              <div className="relative mt-1">
+                <Clock className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  type="text"
+                  value={config?.booking_time_from || '11:00 AM'}
+                  onChange={(e) => setConfig(prev => prev ? { ...prev, booking_time_from: e.target.value } : null)}
+                  placeholder="11:00 AM"
+                  className="w-full rounded-lg border border-border bg-background pl-9 pr-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">Earliest bookable time (e.g. 11:00 AM)</p>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-foreground">Booking To</label>
+              <div className="relative mt-1">
+                <Clock className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  type="text"
+                  value={config?.booking_time_to || '9:00 PM'}
+                  onChange={(e) => setConfig(prev => prev ? { ...prev, booking_time_to: e.target.value } : null)}
+                  placeholder="9:00 PM"
+                  className="w-full rounded-lg border border-border bg-background pl-9 pr-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">Latest bookable time (e.g. 9:00 PM)</p>
+            </div>
+          </div>
+
+          {/* Buffer + Date Range */}
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div>
+              <label className="text-xs font-medium text-foreground">Buffer Time (minutes)</label>
+              <input
+                type="number"
+                min={0}
+                max={1440}
+                value={config?.booking_time_buffer_minutes ?? 60}
+                onChange={(e) => setConfig(prev => prev ? { ...prev, booking_time_buffer_minutes: parseInt(e.target.value) || 0 } : null)}
+                className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+              />
+              <p className="mt-1 text-xs text-muted-foreground">Minimum minutes from now for today's bookings</p>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-foreground">Date Range (days)</label>
+              <input
+                type="number"
+                min={1}
+                max={365}
+                value={config?.booking_date_range_days ?? 30}
+                onChange={(e) => setConfig(prev => prev ? { ...prev, booking_date_range_days: parseInt(e.target.value) || 1 } : null)}
+                className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+              />
+              <p className="mt-1 text-xs text-muted-foreground">How many days ahead customers can book</p>
+            </div>
+          </div>
+
+          {/* Block Today Booking */}
+          <div className="border-t border-border pt-4 space-y-4">
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="block_today_booking"
+                checked={config?.block_today_booking ?? false}
+                onChange={(e) => setConfig(prev => {
+                  if (!prev) return null
+                  return {
+                    ...prev,
+                    block_today_booking: e.target.checked,
+                    block_today_timestamp: e.target.checked ? new Date().toISOString() : null
+                  }
+                })}
+                className="h-4 w-4 rounded border-border text-primary focus:ring-primary bg-background cursor-pointer"
+              />
+              <label htmlFor="block_today_booking" className="text-sm font-medium text-foreground cursor-pointer">
+                Block bookings for today
+              </label>
+            </div>
+
+            {(config?.block_today_booking) && (
+              <div>
+                <label className="text-xs font-medium text-foreground">Block Today Message</label>
+                <textarea
+                  value={config?.block_today_message || ''}
+                  onChange={(e) => setConfig(prev => prev ? { ...prev, block_today_message: e.target.value } : null)}
+                  rows={2}
+                  placeholder="Sorry, we are not accepting bookings for today."
+                  className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary resize-none"
+                />
+                <p className="mt-1 text-xs text-muted-foreground">Message shown when customers try to book for today</p>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Confirmation Message */}

@@ -20,6 +20,7 @@ import { supabaseAdmin } from '@/lib/flows/admin-client'
 import {
   engineSendInteractiveButtons,
   engineSendInteractiveList,
+  engineSendMedia,
   engineSendText,
 } from '@/lib/flows/meta-send'
 import type { ParsedInbound } from '@/lib/flows/types'
@@ -80,12 +81,28 @@ export async function dispatchInboundToRestaurant(
       }
     }
 
-    // Check if the message is a "Restart Session" button click.
-    const isRestartClick = input.message.kind === 'interactive_reply' && input.message.reply_id === 'restaurant_restart_session'
-
-    if (isRestartClick) {
+    // Check if the message is a restaurant button click.
+    if (input.message.kind === 'interactive_reply' && input.message.reply_id.startsWith('restaurant_')) {
+      const replyId = input.message.reply_id
       const newSession = await createSession(db, input)
-      await sendWelcome(db, config, input, newSession)
+
+      if (replyId === 'restaurant_welcome_book_table' || replyId === 'restaurant_menu_book_table') {
+        await startBookingFlow(db, input, newSession)
+      } else if (replyId === 'restaurant_welcome_view_options' || replyId === 'restaurant_view_options') {
+        await sendMainMenu(db, input, newSession)
+      } else if (replyId === 'restaurant_restart_session') {
+        await sendWelcome(db, config, input, newSession)
+      } else {
+        // Old or expired button click from a past flow
+        await engineSendText({
+          accountId: input.accountId,
+          userId: input.userId,
+          conversationId: input.conversationId,
+          contactId: input.contactId,
+          text: '🔄 Your previous session has expired. Starting a new session for you...',
+        })
+        await sendWelcome(db, config, input, newSession)
+      }
       return { consumed: true }
     }
 
@@ -99,7 +116,7 @@ export async function dispatchInboundToRestaurant(
       : []
 
     const text = cleanWhatsAppFormatting(input.message.text).toLowerCase()
-    
+
     // Check if we should match any incoming message
     const matchAny = config.start_on_any_message || keywords.length === 0 || keywords.includes('*')
 
@@ -312,20 +329,28 @@ async function sendWelcome(
   input: RestaurantDispatchInput,
   session: RestaurantConversationState,
 ): Promise<void> {
-  const buttons = [
-    {
+  const menuItems = await loadMenuItems(db, input.accountId)
+  const isBookTableEnabled = menuItems.some(item => item.action_type === 'book_table')
+
+  const buttons = []
+  if (isBookTableEnabled) {
+    buttons.push({
       id: 'restaurant_welcome_book_table',
       title: 'Book A Table',
-    },
-    {
+    })
+  }
+
+  if (config.show_latest_booking !== false) {
+    buttons.push({
       id: 'restaurant_welcome_latest_booking',
       title: 'Latest Booking',
-    },
-    {
-      id: 'restaurant_welcome_view_options',
-      title: (config.welcome_button_label || 'View Options').slice(0, 20),
-    },
-  ]
+    })
+  }
+
+  buttons.push({
+    id: 'restaurant_welcome_view_options',
+    title: (config.welcome_button_label || 'View Options').slice(0, 20),
+  })
 
   await engineSendInteractiveButtons({
     accountId: input.accountId,
@@ -344,6 +369,21 @@ async function startBookingFlow(
   input: RestaurantDispatchInput,
   session: RestaurantConversationState,
 ): Promise<void> {
+  const menuItems = await loadMenuItems(db, input.accountId)
+  const isBookTableEnabled = menuItems.some(item => item.action_type === 'book_table')
+
+  if (!isBookTableEnabled) {
+    await engineSendText({
+      accountId: input.accountId,
+      userId: input.userId,
+      conversationId: input.conversationId,
+      contactId: input.contactId,
+      text: 'Sorry, table booking is currently unavailable. Please choose another option.',
+    })
+    await sendMainMenu(db, input, session)
+    return
+  }
+
   const fields = await loadBookingFields(db, input.accountId)
   if (fields.length === 0) {
     await engineSendText({
@@ -356,6 +396,52 @@ async function startBookingFlow(
     await deactivateSession(db, session.id)
     return
   }
+
+  // Check if dates are completely blocked (e.g., today is blocked and no future dates are bookable)
+  const dateField = fields.find(f => f.field_type === 'date')
+  if (dateField) {
+    const bookingConfig = await loadConfig(db, input.accountId)
+    const rangeDays = bookingConfig?.booking_date_range_days ?? 30
+    const blockToday = bookingConfig ? isBlockTodayActive(bookingConfig) : false
+
+    // Generate dates to see if any are available
+    const dates: string[] = []
+    const limitDays = Math.min(rangeDays, 2)
+    const istParts = getISTDateParts(new Date())
+    for (let i = 0; i < limitDays; i++) {
+      const d = new Date(istParts.year, istParts.month, istParts.day)
+      d.setDate(d.getDate() + i)
+      if (i === 0) {
+        if (!blockToday) {
+          const timeFrom = bookingConfig?.booking_time_from || '11:00 AM'
+          const timeTo = bookingConfig?.booking_time_to || '9:00 PM'
+          const bufferMinutes = bookingConfig?.booking_time_buffer_minutes ?? 60
+          const slots = generateTimeSlots(timeFrom, timeTo, 30)
+          const cutoff = getISTCurrentTimeInMinutes() + bufferMinutes
+          const availableSlots = slots.filter(s => {
+            const mins = parseTimeToMinutes(s)
+            return mins !== null && mins >= cutoff
+          })
+          if (availableSlots.length > 0) {
+            dates.push('Today')
+          }
+        }
+      } else if (i === 1) dates.push('Tomorrow')
+    }
+
+    if (dates.length === 0) {
+      await engineSendText({
+        accountId: input.accountId,
+        userId: input.userId,
+        conversationId: input.conversationId,
+        contactId: input.contactId,
+        text: bookingConfig?.block_today_message || 'Sorry, we are not accepting bookings for today.',
+      })
+      await deactivateSession(db, session.id)
+      return
+    }
+  }
+
   await sendBookingField(db, input, session, fields, 0)
 }
 
@@ -425,21 +511,47 @@ async function sendBookingField(
   const field = fields[fieldIndex]
 
   if (field.field_type === 'date') {
-    // Generate next 7 days for the interactive list
+    // Load config for date range and today-block settings
+    const bookingConfig = await loadConfig(db, input.accountId)
+    const rangeDays = bookingConfig?.booking_date_range_days ?? 30
+    const blockToday = bookingConfig ? isBlockTodayActive(bookingConfig) : false
+
+    // Generate dates within the configured range (only today and tomorrow)
     const dates: string[] = []
-    for (let i = 0; i < 7; i++) {
-      const d = new Date()
+    const limitDays = Math.min(rangeDays, 2)
+    const istParts = getISTDateParts(new Date())
+    for (let i = 0; i < limitDays; i++) {
+      const d = new Date(istParts.year, istParts.month, istParts.day)
       d.setDate(d.getDate() + i)
-      if (i === 0) dates.push('Today')
-      else if (i === 1) dates.push('Tomorrow')
-      else {
-        const formatted = d.toLocaleDateString('en-US', {
-          weekday: 'long',
-          month: 'short',
-          day: 'numeric',
-        })
-        dates.push(formatted)
-      }
+      if (i === 0) {
+        if (!blockToday) {
+          const timeFrom = bookingConfig?.booking_time_from || '11:00 AM'
+          const timeTo = bookingConfig?.booking_time_to || '9:00 PM'
+          const bufferMinutes = bookingConfig?.booking_time_buffer_minutes ?? 60
+          const slots = generateTimeSlots(timeFrom, timeTo, 30)
+          const cutoff = getISTCurrentTimeInMinutes() + bufferMinutes
+          const availableSlots = slots.filter(s => {
+            const mins = parseTimeToMinutes(s)
+            return mins !== null && mins >= cutoff
+          })
+          if (availableSlots.length > 0) {
+            dates.push('Today')
+          }
+        }
+      } else if (i === 1) dates.push('Tomorrow')
+    }
+
+    // If today is blocked and no dates remain, show the block message
+    if (dates.length === 0) {
+      await engineSendText({
+        accountId: input.accountId,
+        userId: input.userId,
+        conversationId: input.conversationId,
+        contactId: input.contactId,
+        text: bookingConfig?.block_today_message || 'Sorry, we are not accepting bookings for today.',
+      })
+      await deactivateSession(db, session.id)
+      return
     }
 
     const rows = [
@@ -447,7 +559,8 @@ async function sendBookingField(
         id: `restaurant_field_${field.field_name}_custom`,
         title: 'Type custom date',
       },
-      ...dates.map((opt, i) => ({
+      // WhatsApp allows max 10 rows total — cap dates at 9 so custom fits
+      ...dates.slice(0, 9).map((opt, i) => ({
         id: `restaurant_field_${field.field_name}_${i}`,
         title: opt.slice(0, 24),
       })),
@@ -463,15 +576,69 @@ async function sendBookingField(
       sections: [{ title: 'Available Dates', rows }],
     })
   } else if (field.field_type === 'time') {
-    const options = [
-      '12:00 PM', '1:00 PM', '2:00 PM',
-      '7:00 PM', '8:00 PM', '9:00 PM',
-      'Type custom time'
-    ]
-    const rows = options.map((opt, i) => ({
-      id: i === 6 ? `restaurant_field_${field.field_name}_custom` : `restaurant_field_${field.field_name}_${i}`,
-      title: opt,
+    // Load config for time window, buffer, and today-block
+    const bookingConfig = await loadConfig(db, input.accountId)
+    const timeFrom = bookingConfig?.booking_time_from || '11:00 AM'
+    const timeTo = bookingConfig?.booking_time_to || '9:00 PM'
+    const bufferMinutes = bookingConfig?.booking_time_buffer_minutes ?? 60
+    const blockToday = bookingConfig ? isBlockTodayActive(bookingConfig) : false
+
+    // Generate all time slots in the configured window
+    let slots = generateTimeSlots(timeFrom, timeTo, 30)
+
+    // If the selected date is today, filter out slots before now + buffer
+    const selectedDate = getCollectedDate(session.collected_data as Record<string, unknown>, fields)
+    if (selectedDate && isSelectedToday(selectedDate) && !blockToday) {
+      const cutoff = getISTCurrentTimeInMinutes() + bufferMinutes
+      slots = slots.filter(s => {
+        const mins = parseTimeToMinutes(s)
+        return mins !== null && mins >= cutoff
+      })
+
+      if (slots.length === 0) {
+        await engineSendText({
+          accountId: input.accountId,
+          userId: input.userId,
+          conversationId: input.conversationId,
+          contactId: input.contactId,
+          text: 'Today\'s booking time is over. Please try tomorrow.',
+        })
+
+        // Go back to date selection
+        const dateFieldIndex = fields.findIndex(f => f.field_type === 'date')
+        if (dateFieldIndex !== -1) {
+          const dateField = fields[dateFieldIndex]
+          const updatedData = { ...(session.collected_data as Record<string, unknown>) }
+          delete updatedData[dateField.field_name]
+
+          const updatedSession = {
+            ...session,
+            collected_data: updatedData,
+            current_field_index: dateFieldIndex,
+          }
+          await updateSession(db, session.id, {
+            collected_data: updatedData,
+            current_field_index: dateFieldIndex,
+          })
+          await sendBookingField(db, input, updatedSession, fields, dateFieldIndex)
+        } else {
+          await deactivateSession(db, session.id)
+        }
+        return
+      }
+    }
+
+    // Build rows from available slots (max 9 so custom option fits within WhatsApp's 10-row limit)
+    const allRows = slots.slice(0, 9).map((opt, i) => ({
+      id: `restaurant_field_${field.field_name}_${i}`,
+      title: opt.slice(0, 24),
     }))
+
+    // Always offer a custom option
+    allRows.push({
+      id: `restaurant_field_${field.field_name}_custom`,
+      title: 'Type custom time',
+    })
 
     await engineSendInteractiveList({
       accountId: input.accountId,
@@ -480,7 +647,7 @@ async function sendBookingField(
       contactId: input.contactId,
       bodyText: `Please select your ${field.field_label}:`,
       buttonLabel: 'Choose Time',
-      sections: [{ title: 'Common Times', rows }],
+      sections: [{ title: 'Available Times', rows: allRows }],
     })
   } else if (field.field_type === 'buttons') {
     const options: string[] = Array.isArray(field.options) ? field.options : []
@@ -736,11 +903,30 @@ async function sendMenu(
       contactId: input.contactId,
       text: 'Our menu is not available online at the moment. Please visit us to see our full menu!',
     })
+  } else if (menuConfig.menu_type === 'image') {
+    await engineSendMedia({
+      accountId: input.accountId,
+      userId: input.userId,
+      conversationId: input.conversationId,
+      contactId: input.contactId,
+      kind: 'image',
+      link: menuConfig.menu_value,
+      caption: 'Our Menu',
+    })
+  } else if (menuConfig.menu_type === 'pdf') {
+    await engineSendMedia({
+      accountId: input.accountId,
+      userId: input.userId,
+      conversationId: input.conversationId,
+      contactId: input.contactId,
+      kind: 'document',
+      link: menuConfig.menu_value,
+      filename: 'Menu.pdf',
+      caption: 'Our Menu',
+    })
   } else {
     const typeLabels: Record<string, string> = {
       website_url: '🔗 View our menu here',
-      pdf: '📄 Download our menu',
-      image: '🖼️ View our menu',
       whatsapp_catalog: '📋 Browse our catalog',
     }
     const label = typeLabels[menuConfig.menu_type] ?? 'View our menu'
@@ -775,6 +961,66 @@ async function handleReply(
     .from('restaurant_conversation_state')
     .update({ last_activity_at: new Date().toISOString() })
     .eq('id', session.id)
+
+  // If it's an interactive reply, validate that it belongs to the current step
+  if (message.kind === 'interactive_reply') {
+    const replyId = message.reply_id || ''
+    let isValid = false
+
+    if (step === 'awaiting_welcome_tap') {
+      isValid = [
+        'restaurant_welcome_book_table',
+        'restaurant_welcome_view_options',
+        'restaurant_view_options',
+        'restaurant_welcome_latest_booking'
+      ].includes(replyId)
+    } else if (step === 'awaiting_menu_selection') {
+      isValid = [
+        'restaurant_menu_book_table',
+        'restaurant_menu_order_online',
+        'restaurant_menu_menu',
+        'restaurant_menu_faq',
+        'restaurant_menu_latest_booking'
+      ].includes(replyId)
+    } else if (step.startsWith('booking_field_')) {
+      const fields = await loadBookingFields(db, input.accountId)
+      const fieldIndex = session.current_field_index
+      const field = fields[fieldIndex]
+      if (field) {
+        isValid = replyId.startsWith(`restaurant_field_${field.field_name}_`)
+      }
+    } else if (step === 'awaiting_delivery_selection') {
+      isValid = replyId.startsWith('restaurant_delivery_')
+    } else if (step === 'awaiting_faq_selection') {
+      isValid = replyId.startsWith('restaurant_faq_')
+    }
+
+    if (!isValid) {
+      // It's a click on a previous/old button!
+      await engineSendText({
+        accountId: input.accountId,
+        userId: input.userId,
+        conversationId: input.conversationId,
+        contactId: input.contactId,
+        text: '⚠️ This option is no longer active. Please respond to the current step.',
+      })
+      // Re-prompt the user for the current step to help them get back on track
+      if (step === 'awaiting_welcome_tap') {
+        await sendWelcome(db, config, input, session)
+      } else if (step === 'awaiting_menu_selection') {
+        await sendMainMenu(db, input, session)
+      } else if (step.startsWith('booking_field_')) {
+        const fields = await loadBookingFields(db, input.accountId)
+        const fieldIndex = session.current_field_index
+        await sendBookingField(db, input, session, fields, fieldIndex)
+      } else if (step === 'awaiting_delivery_selection') {
+        await sendDeliveryPlatforms(db, input, session)
+      } else if (step === 'awaiting_faq_selection') {
+        await sendFaqList(db, input, session)
+      }
+      return
+    }
+  }
 
   // ---- Welcome tap ----
   if (step === 'awaiting_welcome_tap') {
@@ -870,23 +1116,35 @@ async function handleReply(
           })
           return
         }
-        
+
         const prefix = `restaurant_field_${field.field_name}_`
         if (replyId.startsWith(prefix)) {
           const idx = parseInt(replyId.slice(prefix.length), 10)
+          // Must match the exact date list generated by sendBookingField
+          const rangeDays = config.booking_date_range_days || 30
+          const blockToday = isBlockTodayActive(config)
           const options: string[] = []
-          for (let i = 0; i < 7; i++) {
-            const d = new Date()
+          const limitDays = Math.min(rangeDays, 2)
+          const istParts = getISTDateParts(new Date())
+          for (let i = 0; i < limitDays; i++) {
+            const d = new Date(istParts.year, istParts.month, istParts.day)
             d.setDate(d.getDate() + i)
-            if (i === 0) options.push('Today')
-            else if (i === 1) options.push('Tomorrow')
-            else {
-              options.push(d.toLocaleDateString('en-US', {
-                weekday: 'long',
-                month: 'short',
-                day: 'numeric',
-              }))
-            }
+            if (i === 0) {
+              if (!blockToday) {
+                const timeFrom = config.booking_time_from || '11:00 AM'
+                const timeTo = config.booking_time_to || '9:00 PM'
+                const bufferMinutes = config.booking_time_buffer_minutes ?? 60
+                const slots = generateTimeSlots(timeFrom, timeTo, 30)
+                const cutoff = getISTCurrentTimeInMinutes() + bufferMinutes
+                const availableSlots = slots.filter(s => {
+                  const mins = parseTimeToMinutes(s)
+                  return mins !== null && mins >= cutoff
+                })
+                if (availableSlots.length > 0) {
+                  options.push('Today')
+                }
+              }
+            } else if (i === 1) options.push('Tomorrow')
           }
           answer = options[idx] ?? message.reply_title
         } else {
@@ -905,6 +1163,61 @@ async function handleReply(
           return
         }
       }
+
+      // Validate booking restrictions for the selected date
+      if (answer) {
+        const dateStr = answer.trim()
+
+        // Check if today is blocked
+        if (isBlockTodayActive(config) && isSelectedToday(dateStr)) {
+          await engineSendText({
+            accountId: input.accountId,
+            userId: input.userId,
+            conversationId: input.conversationId,
+            contactId: input.contactId,
+            text: config.block_today_message || 'Sorry, we are not accepting bookings for today.',
+          })
+          // Blocked today — deactivate session so they start fresh
+          await deactivateSession(db, session.id)
+          return
+        }
+
+        // Check if the date is within the configured range
+        const parsedDate = parseDateString(dateStr)
+        if (parsedDate) {
+          const now = new Date()
+          const maxDays = config.booking_date_range_days ?? 30
+          const maxDate = new Date(now)
+          maxDate.setDate(maxDate.getDate() + maxDays)
+
+          // Normalize to start of day for comparison
+          const normDate = new Date(parsedDate.getFullYear(), parsedDate.getMonth(), parsedDate.getDate())
+          const normNow = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+          const normMax = new Date(maxDate.getFullYear(), maxDate.getMonth(), maxDate.getDate())
+
+          if (normDate < normNow) {
+            await engineSendText({
+              accountId: input.accountId,
+              userId: input.userId,
+              conversationId: input.conversationId,
+              contactId: input.contactId,
+              text: `❌ This date has already passed. Please select a future date:`,
+            })
+            return
+          }
+
+          if (normDate > normMax) {
+            await engineSendText({
+              accountId: input.accountId,
+              userId: input.userId,
+              conversationId: input.conversationId,
+              contactId: input.contactId,
+              text: `❌ We only accept bookings up to ${maxDays} days ahead. Please select an earlier date:`,
+            })
+            return
+          }
+        }
+      }
     } else if (field.field_type === 'time') {
       if (message.kind === 'interactive_reply') {
         const replyId = message.reply_id
@@ -918,15 +1231,27 @@ async function handleReply(
           })
           return
         }
-        
+
         const prefix = `restaurant_field_${field.field_name}_`
         if (replyId.startsWith(prefix)) {
           const idx = parseInt(replyId.slice(prefix.length), 10)
-          const options = [
-            '12:00 PM', '1:00 PM', '2:00 PM',
-            '7:00 PM', '8:00 PM', '9:00 PM'
-          ]
-          answer = options[idx] ?? message.reply_title
+          const timeFrom = config.booking_time_from || '11:00 AM'
+          const timeTo = config.booking_time_to || '9:00 PM'
+          const slots = generateTimeSlots(timeFrom, timeTo, 30)
+
+          // Apply today's buffer filter to match what was shown
+          const selectedDate = getCollectedDate(session.collected_data as Record<string, unknown>, fields)
+          let availableSlots = [...slots]
+          const blockToday = isBlockTodayActive(config)
+          if (selectedDate && isSelectedToday(selectedDate) && !blockToday) {
+            const cutoff = getISTCurrentTimeInMinutes() + (config.booking_time_buffer_minutes ?? 60)
+            availableSlots = slots.filter(s => {
+              const mins = parseTimeToMinutes(s)
+              return mins !== null && mins >= cutoff
+            })
+          }
+
+          answer = availableSlots[idx] ?? message.reply_title
         } else {
           answer = message.reply_title
         }
@@ -942,6 +1267,94 @@ async function handleReply(
           })
           return
         }
+      }
+
+      // Validate time restrictions
+      if (answer) {
+        let timeStr = answer.trim()
+        let timeMins = parseTimeToMinutes(timeStr)
+
+        // Check if the selected date is today to customize start time range
+        const selectedDate = getCollectedDate(session.collected_data as Record<string, unknown>, fields)
+        const isToday = selectedDate && isSelectedToday(selectedDate)
+        const blockToday = isBlockTodayActive(config)
+
+        let effectiveFrom = config.booking_time_from || '11:00 AM'
+        if (isToday && !blockToday) {
+          const bufferMinutes = config.booking_time_buffer_minutes ?? 60
+          const cutoff = getISTCurrentTimeInMinutes() + bufferMinutes
+          const slots = generateTimeSlots(effectiveFrom, config.booking_time_to || '9:00 PM', 30)
+          const availableSlots = slots.filter(s => {
+            const mins = parseTimeToMinutes(s)
+            return mins !== null && mins >= cutoff
+          })
+
+          if (availableSlots.length === 0) {
+            await engineSendText({
+              accountId: input.accountId,
+              userId: input.userId,
+              conversationId: input.conversationId,
+              contactId: input.contactId,
+              text: 'Today\'s booking time is over. Please try tomorrow.',
+            })
+
+            // Go back to date selection
+            const dateFieldIndex = fields.findIndex(f => f.field_type === 'date')
+            if (dateFieldIndex !== -1) {
+              const dateField = fields[dateFieldIndex]
+              const updatedData = { ...(session.collected_data as Record<string, unknown>) }
+              delete updatedData[dateField.field_name]
+
+              const updatedSession = {
+                ...session,
+                collected_data: updatedData,
+                current_field_index: dateFieldIndex,
+              }
+              await updateSession(db, session.id, {
+                collected_data: updatedData,
+                current_field_index: dateFieldIndex,
+              })
+              await sendBookingField(db, input, updatedSession, fields, dateFieldIndex)
+            } else {
+              await deactivateSession(db, session.id)
+            }
+            return
+          }
+
+          effectiveFrom = availableSlots[0]
+        }
+
+        const effectiveFromMins = parseTimeToMinutes(effectiveFrom)
+        const toMins = parseTimeToMinutes(config.booking_time_to || '9:00 PM')
+
+        // If timeMins is parsed successfully but is less than the start range,
+        // check if adding 12 hours (720 minutes) makes it a valid time within the range.
+        // E.g. user typed "2:30" (2:30 AM), but the range is PM-only.
+        if (timeMins !== null && effectiveFromMins !== null && toMins !== null) {
+          if (timeMins < effectiveFromMins && !timeStr.toLowerCase().includes('am') && !timeStr.toLowerCase().includes('pm')) {
+            const adjustedMins = timeMins + 720
+            if (adjustedMins >= effectiveFromMins && adjustedMins <= toMins) {
+              timeMins = adjustedMins
+              timeStr = minutesToTimeString(timeMins)
+              answer = timeStr
+            }
+          }
+        }
+
+        // Check time is within the configured window
+        if (timeMins === null || (effectiveFromMins !== null && timeMins < effectiveFromMins) || (toMins !== null && timeMins > toMins)) {
+          await engineSendText({
+            accountId: input.accountId,
+            userId: input.userId,
+            conversationId: input.conversationId,
+            contactId: input.contactId,
+            text: `❌ Please select a time between *${effectiveFrom}* and *${config.booking_time_to || '9:00 PM'}*:`,
+          })
+          return
+        }
+
+        // Normalize answer to standard "HH:MM AM/PM" format
+        answer = minutesToTimeString(timeMins)
       }
     } else if (field.field_type === 'number') {
       if (message.kind === 'text') {
@@ -1097,10 +1510,10 @@ async function handleReply(
 function isValidDate(str: string): boolean {
   const s = cleanWhatsAppFormatting(str).toLowerCase()
   if (s === 'today' || s === 'tomorrow' || s === 'day after tomorrow') return true
-  
+
   const regex1 = /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/
   const regex2 = /^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/
-  
+
   if (regex1.test(s)) {
     const match = s.match(regex1)
     if (match) {
@@ -1111,7 +1524,7 @@ function isValidDate(str: string): boolean {
       return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day
     }
   }
-  
+
   if (regex2.test(s)) {
     const match = s.match(regex2)
     if (match) {
@@ -1122,7 +1535,7 @@ function isValidDate(str: string): boolean {
       return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day
     }
   }
-  
+
   const timestamp = Date.parse(cleanWhatsAppFormatting(str))
   return !isNaN(timestamp)
 }
@@ -1131,7 +1544,7 @@ function isValidTime(str: string): boolean {
   const s = cleanWhatsAppFormatting(str).toLowerCase()
   const regex12 = /^(0?[1-9]|1[0-2]):[0-5][0-9]\s*(am|pm)$/
   const regex24 = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/
-  
+
   return regex12.test(s) || regex24.test(s)
 }
 
@@ -1143,6 +1556,135 @@ function isValidNumber(str: string): boolean {
 
 function cleanWhatsAppFormatting(str: string): string {
   return str.replace(/^[\*_~`\s]+|[\*_~`\s]+$/g, '').trim()
+}
+
+// ============================================================
+// Booking time/date restriction helpers
+// ============================================================
+
+/** Parse "HH:MM AM/PM" or "HH:MM" (24h) into minutes since midnight. */
+function parseTimeToMinutes(str: string): number | null {
+  const s = cleanWhatsAppFormatting(str).toLowerCase()
+  // Try 12-hour format
+  const match12 = s.match(/^(\d{1,2}):(\d{2})\s*(am|pm)$/)
+  if (match12) {
+    let h = parseInt(match12[1], 10)
+    const m = parseInt(match12[2], 10)
+    if (match12[3] === 'pm' && h !== 12) h += 12
+    if (match12[3] === 'am' && h === 12) h = 0
+    return h * 60 + m
+  }
+  // Try 24-hour format
+  const match24 = s.match(/^(\d{1,2}):(\d{2})$/)
+  if (match24) {
+    const h = parseInt(match24[1], 10)
+    const m = parseInt(match24[2], 10)
+    if (h < 0 || h > 23 || m < 0 || m > 59) return null
+    return h * 60 + m
+  }
+  return null
+}
+
+/** Format minutes since midnight back to "HH:MM AM/PM" (12-hour). */
+function minutesToTimeString(minutes: number): string {
+  const h = Math.floor(minutes / 60)
+  const m = minutes % 60
+  const period = h >= 12 ? 'PM' : 'AM'
+  const displayH = h === 0 ? 12 : h > 12 ? h - 12 : h
+  return `${displayH}:${m.toString().padStart(2, '0')} ${period}`
+}
+
+/** Generate time slots between from and to at the given interval (default 30 min). */
+function generateTimeSlots(from: string, to: string, intervalMinutes = 30): string[] {
+  const fromMin = parseTimeToMinutes(from)
+  const toMin = parseTimeToMinutes(to)
+  if (fromMin === null || toMin === null || fromMin >= toMin) return []
+
+  const slots: string[] = []
+  for (let m = fromMin; m <= toMin; m += intervalMinutes) {
+    slots.push(minutesToTimeString(m))
+  }
+  return slots
+}
+
+/** Check if a date string (as stored in collected_data) refers to today. */
+function isSelectedToday(dateStr: string): boolean {
+  const s = cleanWhatsAppFormatting(dateStr).toLowerCase()
+  if (s === 'today') return true
+
+  // Get current date in IST timezone
+  const now = new Date()
+  const todayFormatted = now.toLocaleDateString('en-US', {
+    timeZone: 'Asia/Kolkata',
+    weekday: 'long', month: 'short', day: 'numeric',
+  }).toLowerCase()
+  if (s === todayFormatted) return true
+
+  // Check DD/MM/YYYY or YYYY-MM-DD
+  const d = parseDateString(s)
+  if (d) {
+    const todayParts = getISTDateParts(now)
+    return d.getFullYear() === todayParts.year &&
+           d.getMonth() === todayParts.month &&
+           d.getDate() === todayParts.day
+  }
+  return false
+}
+
+/** Parse a date string into a Date object. Returns null on failure. */
+function parseDateString(str: string): Date | null {
+  const s = cleanWhatsAppFormatting(str).toLowerCase()
+  const now = new Date()
+  const istParts = getISTDateParts(now)
+
+  if (s === 'today') {
+    return new Date(istParts.year, istParts.month, istParts.day)
+  }
+  if (s === 'tomorrow') {
+    const d = new Date(istParts.year, istParts.month, istParts.day)
+    d.setDate(d.getDate() + 1)
+    return d
+  }
+
+  const regex1 = /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/
+  const regex2 = /^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/
+
+  let match = s.match(regex1)
+  if (match) {
+    const day = parseInt(match[1], 10)
+    const month = parseInt(match[2], 10)
+    const year = parseInt(match[3], 10)
+    return new Date(year, month - 1, day)
+  }
+
+  match = s.match(regex2)
+  if (match) {
+    const year = parseInt(match[1], 10)
+    const month = parseInt(match[2], 10)
+    const day = parseInt(match[3], 10)
+    return new Date(year, month - 1, day)
+  }
+
+  const timestamp = Date.parse(s)
+  if (!isNaN(timestamp)) return new Date(timestamp)
+  return null
+}
+
+/** Find the date value from collected_data by looking for the date-type field. */
+function getCollectedDate(
+  collectedData: Record<string, unknown>,
+  fields: RestaurantBookingField[],
+): string {
+  const dateField = fields.find(f => f.field_type === 'date')
+  if (!dateField) return ''
+  const val = collectedData[dateField.field_name]
+  return typeof val === 'string' ? val : ''
+}
+
+/** Calculate how many minutes from now a time slot is — used for buffer check. */
+function getMinutesUntil(slotMinutes: number): number {
+  const nowMinutes = getISTCurrentTimeInMinutes()
+  return slotMinutes - nowMinutes
 }
 
 async function sendLatestBooking(
@@ -1178,7 +1720,7 @@ async function sendLatestBooking(
   }
 
   const data = (booking.booking_json || {}) as Record<string, string>
-  
+
   const statusLabels: Record<string, string> = {
     pending: 'Pending ⏳',
     confirmed: 'Confirmed ✅',
@@ -1217,4 +1759,80 @@ async function sendLatestBooking(
   if (config) {
     await sendWelcome(db, config, input, session)
   }
+}
+
+export function isBlockTodayActive(config: { block_today_booking: boolean; block_today_timestamp: string | null }): boolean {
+  if (!config.block_today_booking || !config.block_today_timestamp) {
+    return false
+  }
+
+  try {
+    const timestampDate = new Date(config.block_today_timestamp)
+    
+    // Get IST date string for the timestamp
+    const tsFormatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    })
+    const tsParts = tsFormatter.formatToParts(timestampDate)
+    const tsYear = tsParts.find(p => p.type === 'year')?.value
+    const tsMonth = tsParts.find(p => p.type === 'month')?.value
+    const tsDay = tsParts.find(p => p.type === 'day')?.value
+    const tsIST = `${tsYear}-${tsMonth}-${tsDay}`
+
+    // Get IST date string for now
+    const nowFormatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    })
+    const nowParts = nowFormatter.formatToParts(new Date())
+    const nowYear = nowParts.find(p => p.type === 'year')?.value
+    const nowMonth = nowParts.find(p => p.type === 'month')?.value
+    const nowDay = nowParts.find(p => p.type === 'day')?.value
+    const nowIST = `${nowYear}-${nowMonth}-${nowDay}`
+
+    return tsIST === nowIST
+  } catch (err) {
+    console.error('Error parsing block_today_timestamp:', err)
+    return config.block_today_booking
+  }
+}
+
+function getISTCurrentTimeInMinutes(): number {
+  const now = new Date()
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false,
+  })
+  const parts = formatter.formatToParts(now)
+  let hour = parseInt(parts.find(p => p.type === 'hour')?.value || '0', 10)
+  const minute = parseInt(parts.find(p => p.type === 'minute')?.value || '0', 10)
+  hour = hour % 24
+  return hour * 60 + minute
+}
+
+export function getISTDateParts(date: Date = new Date()): { year: number; month: number; day: number } {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+  })
+  const parts = formatter.formatToParts(date)
+  return {
+    year: parseInt(parts.find(p => p.type === 'year')?.value || '0', 10),
+    month: parseInt(parts.find(p => p.type === 'month')?.value || '0', 10) - 1, // 0-indexed month
+    day: parseInt(parts.find(p => p.type === 'day')?.value || '0', 10),
+  }
+}
+
+function getISTMinutesUntil(slotMinutes: number): number {
+  const nowMinutes = getISTCurrentTimeInMinutes()
+  return slotMinutes - nowMinutes
 }

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { supabaseAdmin } from '@/lib/flows/admin-client'
+import { isBlockTodayActive } from '@/lib/restaurant/flow-engine'
 
 /**
  * GET /api/restaurant/config — fetch restaurant config for the caller's account.
@@ -51,6 +52,23 @@ export async function GET() {
     return NextResponse.json({ config: created })
   }
 
+  // Check if today-blocking has expired
+  if (data.block_today_booking && !isBlockTodayActive(data)) {
+    const admin = supabaseAdmin()
+    const { data: updated } = await admin
+      .from('restaurant_config')
+      .update({
+        block_today_booking: false,
+        block_today_timestamp: null,
+      })
+      .eq('id', data.id)
+      .select()
+      .single()
+    if (updated) {
+      return NextResponse.json({ config: updated })
+    }
+  }
+
   return NextResponse.json({ config: data })
 }
 
@@ -77,6 +95,9 @@ export async function PUT(request: Request) {
     'is_enabled', 'trigger_keywords', 'session_timeout_minutes',
     'linked_automation_id', 'show_latest_booking',
     'start_on_any_message', 'restart_message', 'restart_button_label',
+    'booking_time_from', 'booking_time_to',
+    'booking_date_range_days', 'booking_time_buffer_minutes',
+    'block_today_booking', 'block_today_timestamp', 'block_today_message',
   ]
   for (const key of allowedFields) {
     if (key in body) updateFields[key] = body[key]
